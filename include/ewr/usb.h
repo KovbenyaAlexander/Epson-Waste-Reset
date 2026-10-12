@@ -75,4 +75,8 @@ namespace ewr {
     // GET_DEVICE_ID control request. Read-only, no D4 traffic.
     DeviceIdQueryResult QueryPrinterDeviceId(bool appendTraceLog = false);
 
+    // Text from outside a device session, such as the network search, into
+    // ewr_trace.log under the same start-fresh-or-append rule.
+    void AppendTraceNote(const std::string& text, bool appendTraceLog = false);
+
 }

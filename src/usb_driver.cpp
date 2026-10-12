@@ -756,4 +756,10 @@ namespace ewr {
         return out;
     }
 
+    void AppendTraceNote(const std::string& text, bool appendTraceLog)
+    {
+        TraceLog traceLog(appendTraceLog);
+        traceLog.stream << text;
+    }
+
 } // namespace ewr
