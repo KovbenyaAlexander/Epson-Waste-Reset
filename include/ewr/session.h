@@ -136,6 +136,11 @@ namespace ewr {
             const ExecutorOptions& options) = 0;
     };
 
+    // The warnings for a USB run that ended silent: jobs waiting in a print
+    // queue on the printer's port, a Ready Print queue driver. False when
+    // neither applies.
+    bool ReportSilentPortQueues(const SilentPortQueues& note);
+
     // The first device call of a run starts ewr_trace.log fresh and every
     // later one appends, so a program run yields one coherent trace file.
     // The --usb-soft-reset switch follows the same lifecycle: only the first
@@ -194,8 +199,11 @@ namespace ewr {
         void RememberPrinterName(const std::string& deviceId);
         ExecutorOptions WithPrinterName(ExecutorOptions options) const;
 
+        void ReportSilentPort(const SilentPortQueues& note);
+
         bool m_traceStarted = false;
         bool m_softResetSent = false;
+        bool m_silentPortReported = false;
         std::string m_printerName;
         std::unique_ptr<RunLock> m_runLock;
     };

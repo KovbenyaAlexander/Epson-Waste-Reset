@@ -6,6 +6,7 @@
 #include "ewr/log.h"
 #include <windows.h>
 #include <setupapi.h>
+#include <winspool.h>
 #include <initguid.h>
 
 #include <algorithm>
@@ -16,6 +17,7 @@
 #include <vector>
 
 #pragma comment(lib, "setupapi.lib")
+#pragma comment(lib, "winspool.lib")
 
 DEFINE_GUID(GUID_DEVINTERFACE_USBPRINT, 0x28d78fad, 0x5a12, 0x11d1, 0xae, 0x5b, 0x00, 0x00, 0xf8, 0x03, 0xa8, 0xc2);
 
@@ -78,12 +80,139 @@ namespace ewr {
             std::string className;
             int classPriority;
             int interfaceIndex;
+            std::string port;
+            std::vector<PrintQueue> queues;
         };
 
         std::string DescribeCandidate(const DeviceCandidate& c)
         {
             return "[" + c.className + " | mi_"
                  + (c.interfaceIndex >= 0 ? std::to_string(c.interfaceIndex) : "N/A") + "] " + c.path;
+        }
+
+        // Queue names reach --json, and the JSON writer rejects text that is
+        // not UTF-8 - which the ANSI code page is not.
+        std::string Utf8(const wchar_t* text)
+        {
+            if (!text || !*text)
+                return std::string();
+
+            const int size = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
+            if (size <= 1)
+                return std::string();
+
+            std::string out(static_cast<std::size_t>(size), '\0');
+            WideCharToMultiByte(CP_UTF8, 0, text, -1, &out[0], size, nullptr, nullptr);
+            out.resize(static_cast<std::size_t>(size) - 1);
+            return out;
+        }
+
+        // usbprint.sys keeps no "Port Name": the port monitor builds it from
+        // "Base Name" and "Port Number" in the interface's Device Parameters
+        // key, which is the key this call opens. "USB" + 1 -> "USB001".
+        std::string ReadUsbprintPort(HDEVINFO hDevInfo, SP_DEVICE_INTERFACE_DATA& iface)
+        {
+            HKEY params = SetupDiOpenDeviceInterfaceRegKey(hDevInfo, &iface, 0, KEY_READ);
+            if (params == INVALID_HANDLE_VALUE)
+                return std::string();
+
+            wchar_t baseName[64] = { 0 };
+            DWORD baseBytes = sizeof(baseName) - sizeof(wchar_t);
+            DWORD number = 0;
+            DWORD numberBytes = sizeof(number);
+            const bool ok =
+                RegGetValueW(params, nullptr, L"Base Name", RRF_RT_REG_SZ, nullptr, baseName, &baseBytes) == ERROR_SUCCESS
+                && RegGetValueW(params, nullptr, L"Port Number", RRF_RT_REG_DWORD, nullptr, &number, &numberBytes) == ERROR_SUCCESS;
+            RegCloseKey(params);
+
+            if (!ok || !baseName[0])
+                return std::string();
+
+            char suffix[16];
+            snprintf(suffix, sizeof(suffix), "%03lu", number);
+            return Utf8(baseName) + suffix;
+        }
+
+        // A queue's own job count also holds printed jobs it keeps ("Keep
+        // printed documents"), so each job's status decides.
+        int CountWaitingJobs(const wchar_t* queueName, DWORD jobCount)
+        {
+            HANDLE queue = nullptr;
+            if (!OpenPrinterW(const_cast<LPWSTR>(queueName), &queue, nullptr))
+                return 0;
+
+            DWORD needed = 0;
+            DWORD returned = 0;
+            EnumJobsW(queue, 0, jobCount, 1, nullptr, 0, &needed, &returned);
+
+            int waiting = 0;
+            std::vector<BYTE> buffer(needed);
+            if (needed > 0 && EnumJobsW(queue, 0, jobCount, 1, buffer.data(), needed, &needed, &returned))
+            {
+                const JOB_INFO_1W* jobs = reinterpret_cast<const JOB_INFO_1W*>(buffer.data());
+                for (DWORD i = 0; i < returned; ++i)
+                    if (!(jobs[i].Status & (JOB_STATUS_PRINTED | JOB_STATUS_COMPLETE | JOB_STATUS_DELETED)))
+                        ++waiting;
+            }
+
+            ClosePrinter(queue);
+            return waiting;
+        }
+
+        // Local queues only: a printer reached through another PC's share
+        // has no USB port here.
+        std::vector<PrintQueue> ListPrintQueues(std::ostream& trace)
+        {
+            std::vector<PrintQueue> out;
+
+            DWORD needed = 0;
+            DWORD returned = 0;
+            EnumPrintersW(PRINTER_ENUM_LOCAL, nullptr, 2, nullptr, 0, &needed, &returned);
+            if (needed == 0)
+            {
+                trace << "[i] Print queues not listed: " << GetWindowsErrorString(GetLastError()) << "\n";
+                return out;
+            }
+
+            std::vector<BYTE> buffer(needed);
+            if (!EnumPrintersW(PRINTER_ENUM_LOCAL, nullptr, 2, buffer.data(), needed, &needed, &returned))
+            {
+                trace << "[i] Print queues not listed: " << GetWindowsErrorString(GetLastError()) << "\n";
+                return out;
+            }
+
+            const PRINTER_INFO_2W* info = reinterpret_cast<const PRINTER_INFO_2W*>(buffer.data());
+            for (DWORD i = 0; i < returned; ++i)
+            {
+                const int waiting = (info[i].cJobs > 0) ? CountWaitingJobs(info[i].pPrinterName, info[i].cJobs) : 0;
+                out.push_back({ Utf8(info[i].pPrinterName), Utf8(info[i].pPortName), Utf8(info[i].pDriverName), waiting });
+            }
+
+            return out;
+        }
+
+        void AttachPrintQueues(std::vector<DeviceCandidate>& candidates, std::ostream& trace)
+        {
+            const bool anyPort = std::any_of(candidates.begin(), candidates.end(),
+                                             [](const DeviceCandidate& c) { return !c.port.empty(); });
+            if (!anyPort)
+                return;
+
+            const std::vector<PrintQueue> queues = ListPrintQueues(trace);
+
+            for (DeviceCandidate& c : candidates)
+            {
+                if (c.port.empty())
+                    continue;
+
+                c.queues = QueuesOnPort(queues, c.port);
+                if (c.queues.empty())
+                    trace << "[i] " << c.port << ": no print queue.\n";
+
+                for (const PrintQueue& queue : c.queues)
+                    trace << "[i] " << c.port << ": print queue \"" << queue.name << "\", driver \"" << queue.driver
+                          << "\", " << queue.waitingJobs << " job(s) waiting\n";
+            }
         }
 
         std::string ExtractPid(const std::string& devicePath)
@@ -190,7 +319,11 @@ namespace ewr {
                                     }
                                 }
 
-                                candidates.push_back({ devicePath, entry.name, entry.classPriority, ifaceIdx });
+                                const std::string port = (std::string(entry.name) == "USBPRINT")
+                                    ? ReadUsbprintPort(hDevInfo, devInterfaceData)
+                                    : std::string();
+
+                                candidates.push_back({ devicePath, entry.name, entry.classPriority, ifaceIdx, port, {} });
                             }
                         }
                     }
@@ -224,6 +357,8 @@ namespace ewr {
                 trace << "          This may target the scanner instead of the printer maintenance engine.\n";
                 trace << "          Consider reinstalling official Epson printer drivers.\n";
             }
+
+            AttachPrintQueues(candidates, trace);
 
             return candidates;
         }
@@ -634,6 +769,8 @@ namespace ewr {
                     c.interfaceNumber = candidates_[i].interfaceIndex;
                     c.path = candidates_[i].path;
                     c.pid = ExtractPid(candidates_[i].path);
+                    c.port = candidates_[i].port;
+                    c.queues = candidates_[i].queues;
                     out.push_back(c);
                 }
                 return out;
