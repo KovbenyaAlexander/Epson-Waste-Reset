@@ -26,6 +26,7 @@
 #include "ewr/discover.h"
 #include "ewr/snmp.h"
 #include "ewr/snmp_gateway.h"
+#include "../cli/color.h"
 #include "../cli/console.h"
 
 namespace fs = std::filesystem;
@@ -6748,6 +6749,73 @@ void test_no_model_repeats_a_gauge_label()
 // interface that failed on the way to one that worked used to print "Handshake
 // FAILED" on a reset that succeeded. The rules live in the CLI; --json and
 // the C API still get every event.
+// The filter sits on std::cout and std::cerr of every terminal run, so text
+// that is not a tag must come through byte for byte.
+void test_tags_are_colored_only_at_a_line_start()
+{
+    std::cout << "[TEST] test_tags_are_colored_only_at_a_line_start" << std::endl;
+
+    namespace ansi = ewr::cli::ansi;
+    const auto painted = [](const char* tag, const char* color) {
+        return std::string(color) + tag + ansi::kReset;
+    };
+
+    std::ostringstream sink;
+    ewr::cli::TagColorBuf buf(sink.rdbuf());
+    std::ostream out(&buf);
+
+    out << "[i] Detecting\n";
+    out << "    [!] indented\n";
+    out << "\n[ERROR] after a blank line\n";
+    out << "plain [i] mid-line\n";
+    out << "  [1] L3150 Series   (a menu entry)\n";
+    out << "\r[*] Writing to the printer... 3/14" << std::flush;
+    out << "\n[ERR";
+    out << "OR] in two pieces\n";
+    out << "Select a printer [0-2]: " << std::flush;
+
+    const std::string text = sink.str();
+    CHECK(text.find(painted("[i]", ansi::kCyan) + " Detecting\n") == 0);
+    CHECK(text.find("    " + painted("[!]", ansi::kYellow) + " indented") != std::string::npos);
+    CHECK(text.find("\n\n" + painted("[ERROR]", ansi::kRed) + " after a blank line") != std::string::npos);
+    CHECK(text.find("plain [i] mid-line\n") != std::string::npos);
+    CHECK(text.find("  [1] L3150 Series   (a menu entry)\n") != std::string::npos);
+    CHECK(text.find("\r" + painted("[*]", ansi::kBlue) + " Writing") != std::string::npos);
+    CHECK(text.find(painted("[ERROR]", ansi::kRed) + " in two pieces") != std::string::npos);
+
+    // A prompt without a newline still reaches the screen on the flush before
+    // the read, uncolored.
+    CHECK(text.size() >= 24 && text.compare(text.size() - 24, 24, "Select a printer [0-2]: ") == 0);
+}
+
+void test_paint_leaves_text_alone_when_color_is_off()
+{
+    std::cout << "[TEST] test_paint_leaves_text_alone_when_color_is_off" << std::endl;
+
+    namespace ansi = ewr::cli::ansi;
+    const ewr::cli::ColorState saved = ewr::cli::Colors();
+
+    ewr::cli::Colors() = {};
+    CHECK(ewr::cli::Paint("OK", ansi::kGreen) == "OK");
+    CHECK(ewr::cli::PaintErr("RESET FAILED", ansi::kRed) == "RESET FAILED");
+
+    ewr::cli::Colors().out = true;
+    CHECK(ewr::cli::Paint("OK", ansi::kGreen) == std::string(ansi::kGreen) + "OK" + ansi::kReset);
+    CHECK(ewr::cli::PaintErr("RESET FAILED", ansi::kRed) == "RESET FAILED");
+    CHECK(ewr::cli::Paint("", ansi::kGreen).empty());
+    CHECK(ewr::cli::Paint("plain", nullptr) == "plain");
+
+    ewr::cli::Colors() = saved;
+
+    // A filling pad: green, yellow halfway, red at the service limit and past it.
+    CHECK(std::string(ewr::cli::RampColor(0)) == "\033[38;5;46m");
+    CHECK(std::string(ewr::cli::RampColor(50)) == "\033[38;5;226m");
+    CHECK(std::string(ewr::cli::RampColor(100)) == "\033[38;5;196m");
+    CHECK(std::string(ewr::cli::RampColor(101)) == "\033[38;5;196m");
+    CHECK(std::string(ewr::cli::RampColor(-3)) == "\033[38;5;46m");
+    CHECK(std::string(ewr::cli::RampColor(84)) == "\033[38;5;208m");
+}
+
 void test_console_hides_the_machinery()
 {
     std::cout << "[TEST] test_console_hides_the_machinery" << std::endl;
@@ -8107,6 +8175,8 @@ int main()
     test_reset_coverage_shapes();
     test_c_abi_plan_reports_reset_coverage();
     test_console_hides_the_machinery();
+    test_tags_are_colored_only_at_a_line_start();
+    test_paint_leaves_text_alone_when_color_is_off();
     test_printer_condition_names_an_error_once();
     test_json_reset_data_lists_overrides();
     test_log_carries_fields();

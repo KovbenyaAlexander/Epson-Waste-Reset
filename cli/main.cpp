@@ -16,9 +16,11 @@
 #include "ewr/version.h"
 #include "ewr/log.h"
 #include "ewr/json_out.h"
+#include "color.h"
 #include "console.h"
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <streambuf>
 #include <utility>
@@ -35,6 +37,9 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <io.h>
+#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
+#endif
 #else
 #include <unistd.h>
 #include <climits>
@@ -260,7 +265,8 @@ static void PrintUsage()
               << "  --help, -h       Show this help.\n";
 }
 
-static std::string GaugeBar(int percent)
+// Only the filled cells take the color, so a bar keeps its width either way.
+static std::string GaugeBar(int percent, const char* color = nullptr)
 {
     if (percent < 0)
         percent = 0;
@@ -269,11 +275,49 @@ static std::string GaugeBar(int percent)
 
     const int filled = (percent + 9) / 10; // any non-zero percent shows a cell
 
-    std::string bar = "[";
-    for (int i = 0; i < 10; ++i)
-        bar += (i < filled) ? '#' : '-';
-    bar += "]";
-    return bar;
+    return "[" + ewr::cli::Paint(std::string(filled, '#'), color) + std::string(10 - filled, '-') + "]";
+}
+
+// A gauge in its own ink. Black keeps the terminal's text color: a black bar
+// vanishes on a dark background.
+static const char* InkColor(const std::string& name)
+{
+    using namespace ewr::cli::ansi;
+    if (name == "Cyan")          return kDarkCyan;
+    if (name == "Light Cyan")    return kCyan;
+    if (name == "Magenta")       return kDarkMagenta;
+    if (name == "Light Magenta") return kMagenta;
+    if (name == "Yellow")        return kYellow;
+    if (name == "Dark Yellow" || name == "Orange") return kDarkYellow;
+    if (name == "Red")           return kRed;
+    if (name == "Blue")          return kBlue;
+    if (name == "Gray" || name == "Light Gray" || name == "Light Black") return kGray;
+    return nullptr;
+}
+
+static const char* LevelWordColor(const std::string& word)
+{
+    using namespace ewr::cli::ansi;
+    if (word == "OK")      return kGreen;
+    if (word == "UNKNOWN") return kGray;
+    if (word == "EMPTY" || word == "MISSING" || word == "FAIL") return kRed;
+    return nullptr;
+}
+
+// How full a pad or maintenance box is, in the same shade as its bar.
+static std::string FillPercent(int percent)
+{
+    char text[16];
+    snprintf(text, sizeof(text), "%3d%%", percent);
+    return ewr::cli::Paint(text, ewr::cli::RampColor(percent));
+}
+
+static const char* ConditionColor(const ewr::PrinterStatus& st)
+{
+    using namespace ewr::cli::ansi;
+    if (st.hasError)            return kRed;
+    if (st.stateName == "IDLE") return kGreen;
+    return kYellow;
 }
 
 static void PrintPrinterStatus(const ewr::PrinterStatus& st)
@@ -285,7 +329,7 @@ static void PrintPrinterStatus(const ewr::PrinterStatus& st)
     }
 
     std::cout << "\n----------- PRINTER STATUS -----------" << std::endl;
-    std::cout << "  State:  " << ewr::DescribePrinterCondition(st) << std::endl;
+    std::cout << "  State:  " << ewr::cli::Paint(ewr::DescribePrinterCondition(st), ConditionColor(st)) << std::endl;
 
     if (!st.serial.empty())
         std::cout << "  Serial: " << st.serial << std::endl;
@@ -295,28 +339,29 @@ static void PrintPrinterStatus(const ewr::PrinterStatus& st)
         std::cout << "  Ink levels:" << std::endl;
         for (const auto& ink : st.inks)
         {
-            char line[96];
+            const std::string word = ewr::cli::Paint(ink.statusText, LevelWordColor(ink.statusText));
+            char line[192];
             if (ink.level >= 0)
                 snprintf(line, sizeof(line), "    %-14.14s %s %3d%%  %s",
-                         ink.colorName.c_str(), GaugeBar(ink.level).c_str(),
-                         ink.level, ink.statusText.c_str());
+                         ink.colorName.c_str(), GaugeBar(ink.level, InkColor(ink.colorName)).c_str(),
+                         ink.level, word.c_str());
             else
                 snprintf(line, sizeof(line), "    %-14.14s %s",
-                         ink.colorName.c_str(), ink.statusText.c_str());
+                         ink.colorName.c_str(), word.c_str());
             std::cout << line << std::endl;
         }
     }
 
     if (st.maintenanceBoxLevel >= 0 || !st.maintenanceBoxText.empty())
     {
-        char line[96];
+        const std::string word = ewr::cli::Paint(st.maintenanceBoxText, LevelWordColor(st.maintenanceBoxText));
+        char line[192];
         if (st.maintenanceBoxLevel >= 0)
-            snprintf(line, sizeof(line), "    %-14.14s %s %3d%%  %s", "Maint. box",
-                     GaugeBar(st.maintenanceBoxLevel).c_str(),
-                     st.maintenanceBoxLevel, st.maintenanceBoxText.c_str());
+            snprintf(line, sizeof(line), "    %-14.14s %s %s  %s", "Maint. box",
+                     GaugeBar(st.maintenanceBoxLevel, ewr::cli::RampColor(st.maintenanceBoxLevel)).c_str(),
+                     FillPercent(st.maintenanceBoxLevel).c_str(), word.c_str());
         else
-            snprintf(line, sizeof(line), "    %-14.14s %s", "Maint. box",
-                     st.maintenanceBoxText.c_str());
+            snprintf(line, sizeof(line), "    %-14.14s %s", "Maint. box", word.c_str());
         std::cout << line << std::endl;
     }
 
@@ -365,14 +410,18 @@ static void PrintCounterSummary(const ewr::DbPrinterModel& model,
         const std::string name = reading.description.empty() ? "Counter" : reading.description;
         const int percent = reading.Percent();
 
-        char line[160];
+        char line[256];
         if (percent >= 0)
         {
-            snprintf(line, sizeof(line), "    %-28.28s %s %3d%%  (%u / %u)%s",
-                     name.c_str(), GaugeBar(percent).c_str(), percent,
+            const std::string limit = (percent >= 100)
+                ? ewr::cli::Paint("  <-- service limit reached", ewr::cli::ansi::kRed)
+                : std::string();
+            snprintf(line, sizeof(line), "    %-28.28s %s %s  (%u / %u)%s",
+                     name.c_str(), GaugeBar(percent, ewr::cli::RampColor(percent)).c_str(),
+                     FillPercent(percent).c_str(),
                      static_cast<unsigned>(reading.value),
                      static_cast<unsigned>(reading.max_value),
-                     percent >= 100 ? "  <-- service limit reached" : "");
+                     limit.c_str());
         }
         else
         {
@@ -435,6 +484,41 @@ static bool StdoutIsTerminal()
 #else
     return isatty(fileno(stdout)) != 0;
 #endif
+}
+
+// A Windows console reads ANSI escapes only in VT mode, which is off until a
+// program asks and refused before Windows 10 - that console gets no color.
+static bool TerminalTakesColor(bool forStdout)
+{
+#ifdef _WIN32
+    const HANDLE handle = GetStdHandle(forStdout ? STD_OUTPUT_HANDLE : STD_ERROR_HANDLE);
+    DWORD mode = 0;
+    if (!GetConsoleMode(handle, &mode))
+        return false;
+    return (mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0
+        || SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0;
+#else
+    const char* term = std::getenv("TERM");
+    return isatty(fileno(forStdout ? stdout : stderr)) != 0 && !(term && std::string(term) == "dumb");
+#endif
+}
+
+// The buffers are never freed: std::cout and std::cerr flush through them
+// during static destruction, after main has returned.
+static void InstallColor()
+{
+    const char* noColor = std::getenv("NO_COLOR");
+    if (noColor && *noColor)
+        return;
+
+    ewr::cli::ColorState& colors = ewr::cli::Colors();
+    colors.out = TerminalTakesColor(true);
+    colors.err = TerminalTakesColor(false);
+
+    if (colors.out)
+        std::cout.rdbuf(new ewr::cli::TagColorBuf(std::cout.rdbuf()));
+    if (colors.err)
+        std::cerr.rdbuf(new ewr::cli::TagColorBuf(std::cerr.rdbuf()));
 }
 
 #ifdef _WIN32
@@ -533,12 +617,14 @@ static void SpinUntil(const std::function<bool()>& done)
 // Releases ship as archives, so EWR announces a new one instead of installing it.
 static void PrintNewVersionBanner(const std::string& latestVersion)
 {
-    std::cout << "\n  ************************************************************\n"
-              << "    A NEW VERSION OF EWR IS AVAILABLE: " << latestVersion
+    using namespace ewr::cli;
+    const std::string rule = Paint("************************************************************", ansi::kYellow);
+    std::cout << "\n  " << rule << "\n"
+              << "    " << Paint("A NEW VERSION OF EWR IS AVAILABLE: " + latestVersion, ansi::kYellow)
               << " (you have " << kEwrCurrentVersion << ")\n"
               << "    Download it here:\n"
-              << "    " << kReleasesPageUrl << "\n"
-              << "  ************************************************************" << std::endl;
+              << "    " << Paint(kReleasesPageUrl, ansi::kCyan) << "\n"
+              << "  " << rule << std::endl;
 }
 
 // Every exit path funnels through here so, in --json mode, the stream always
@@ -639,18 +725,21 @@ static int ChooseNetworkPrinter(const std::vector<ewr::NetworkPrinter>& found,
 
 static int FinishReset(bool resetOk)
 {
+    using namespace ewr::cli;
     if (resetOk)
     {
-        std::cout << "\n========================================" << std::endl;
-        std::cout << " SUCCESS! Turn the printer OFF, then ON." << std::endl;
-        std::cout << "========================================" << std::endl;
+        const std::string rule = Paint("========================================", ansi::kGreen);
+        std::cout << "\n" << rule << std::endl;
+        std::cout << Paint(" SUCCESS! Turn the printer OFF, then ON.", ansi::kGreen) << std::endl;
+        std::cout << rule << std::endl;
     }
     else
     {
-        std::cerr << "\n========================================" << std::endl;
-        std::cerr << " RESET FAILED. See messages above and" << std::endl;
-        std::cerr << " ewr_trace.log for details." << std::endl;
-        std::cerr << "========================================" << std::endl;
+        const std::string rule = PaintErr("========================================", ansi::kRed);
+        std::cerr << "\n" << rule << std::endl;
+        std::cerr << PaintErr(" RESET FAILED. See messages above and", ansi::kRed) << std::endl;
+        std::cerr << PaintErr(" ewr_trace.log for details.", ansi::kRed) << std::endl;
+        std::cerr << rule << std::endl;
     }
 
     return FinishRun(resetOk ? 0 : 1);
@@ -932,6 +1021,10 @@ int main(int argc, char* argv[])
                 g_json->Event(event);
         });
     }
+    else
+    {
+        InstallColor();
+    }
 
     for (int i = 1; i < argc; ++i)
     {
@@ -1108,7 +1201,7 @@ int main(int argc, char* argv[])
         && !(cli.statusOnly || cli.listOnly || cli.dryRun || cli.dump || cli.findKey || cli.assumeYes);
 
     std::cout << "========================================" << std::endl;
-    std::cout << "       EWR - Epson Waste Reset          " << std::endl;
+    std::cout << "       " << ewr::cli::Paint("EWR - Epson Waste Reset", ewr::cli::ansi::kCyan) << "          " << std::endl;
     std::cout << "       Version " << kEwrCurrentVersion << std::endl;
     std::cout << "========================================\n" << std::endl;
 

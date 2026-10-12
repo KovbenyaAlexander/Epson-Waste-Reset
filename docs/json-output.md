@@ -10,7 +10,7 @@ ewr --status --model L3150 --json --no-update
 ```
 
 ```json
-{"v":1,"type":"hello","seq":0,"t":0,"ewr":"1.4.1","platform":"windows","command":"status","model":"L3150","flags":{...}}
+{"v":1,"type":"hello","seq":0,"t":0,"ewr":"1.5.0","platform":"windows","command":"status","model":"L3150","flags":{...}}
 {"v":1,"type":"event","seq":1,"t":31,"code":"db.loaded","level":"info","stage":"database","message":"...","index":null,"total":null,"fields":{}}
 {"v":1,"type":"result","seq":9,"t":9412,"command":"status","ok":true,"exit":0,"error_code":null,"error":null,"data":{...}}
 ```
@@ -55,7 +55,7 @@ Every line carries these:
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `ewr` | string | EWR version, e.g. `"1.4.1"`. |
+| `ewr` | string | EWR version, e.g. `"1.5.0"`. |
 | `platform` | string | `windows`, `linux` or `macos`. |
 | `command` | string | `status`, `dump`, `list`, `dry-run`, `reset`, `find-addresses` or `find-key`. |
 | `model` | string/null | What `--model` named, before matching. `null` when not given. |
