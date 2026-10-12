@@ -76,13 +76,17 @@ Every line carries these:
 Codes are namespaced by layer (`db.`, `usb.`, `snmp.`, `exec.`, `d4.`,
 `end4.`, `update.`). A release can add codes; it will not repurpose one.
 
-Events that carry `fields` so far (values are decimal strings, like every field):
+Events that carry `fields` so far (every value is a string; numbers are decimal):
 
 | Code | Fields |
 | --- | --- |
 | `usb.soft_reset_wait` | `limit_ms`: how long EWR will wait for the printer to finish re-initializing |
 | `usb.soft_reset_settled` | `elapsed_ms`: how long it took |
 | `usb.soft_reset_settle_timeout` | `limit_ms`, `elapsed_ms` |
+| `usb.print_jobs_waiting` | `queue`: the Windows print queue, `port`: its USB port (`USB001`), `jobs`: how many of its jobs are not yet printed. Warning: the printer did not answer, and jobs are waiting for it |
+| `usb.ready_print_driver` | `queue`, `port`. Warning: the printer did not answer, and the queue on its port uses Windows Ready Print's "Microsoft IPP Class Driver" |
+
+Both come from the first USB session of a run that ends with the printer silent, one event per queue; a later silent session in the same run repeats neither.
 
 ## `result`
 

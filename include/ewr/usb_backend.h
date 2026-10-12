@@ -1,5 +1,6 @@
 #pragma once
 #include "ewr/executor.h"
+#include "ewr/usb.h"
 
 #include <cstddef>
 #include <memory>
@@ -23,7 +24,13 @@ namespace ewr {
         std::string path;
         // Four lowercase hex digits, or "UNKNOWN" when unparsable.
         std::string pid;
+        // Windows usbprint only: the spooler port ("USB001") and the queues
+        // printing to it. Empty elsewhere.
+        std::string port;
+        std::vector<PrintQueue> queues;
     };
+
+    std::vector<PrintQueue> QueuesOnPort(const std::vector<PrintQueue>& queues, const std::string& port);
 
     // Platform seam for the driver loop in usb_driver.cpp. The driver owns
     // candidate iteration, pinning, retry-and-fallback and the trace

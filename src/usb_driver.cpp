@@ -7,6 +7,8 @@
 #include "ewr/status.h"
 #include "ewr/version.h"
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -449,7 +451,82 @@ namespace ewr {
             }
         }
 
+        std::string Lowercase(std::string text)
+        {
+            std::transform(text.begin(), text.end(), text.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return text;
+        }
+
+        std::string Trim(const std::string& text)
+        {
+            const std::size_t first = text.find_first_not_of(" \t");
+            if (first == std::string::npos)
+                return std::string();
+
+            return text.substr(first, text.find_last_not_of(" \t") - first + 1);
+        }
+
+        void NoteSilentPort(SilentPortQueues& note, const UsbCandidate& cand, bool handshakeFailed)
+        {
+            if (handshakeFailed && note.port.empty() && !cand.port.empty())
+                note = { cand.port, cand.queues };
+        }
+
+        // A later interface that answered makes the silent one beside the point.
+        void SettleSilentPort(SilentPortQueues& note, bool runEndedSilent, std::ostream& trace)
+        {
+            if (!runEndedSilent)
+            {
+                note = {};
+                return;
+            }
+
+            for (const PrintQueue& queue : note.queues)
+            {
+                if (queue.waitingJobs > 0)
+                    trace << "[!] Silent on " << note.port << " with " << queue.waitingJobs
+                          << " job(s) waiting in print queue \"" << queue.name << "\".\n";
+
+                if (IsReadyPrintDriver(queue.driver))
+                    trace << "[!] Silent on " << note.port << ", where print queue \"" << queue.name
+                          << "\" is a Ready Print one (Microsoft IPP Class Driver).\n";
+            }
+        }
+
     } // namespace
+
+    std::vector<PrintQueue> QueuesOnPort(const std::vector<PrintQueue>& queues, const std::string& port)
+    {
+        std::vector<PrintQueue> out;
+        if (port.empty())
+            return out;
+
+        const std::string wanted = Lowercase(port);
+
+        for (const PrintQueue& queue : queues)
+        {
+            std::size_t start = 0;
+            while (start <= queue.ports.size())
+            {
+                const std::size_t comma = std::min(queue.ports.find(',', start), queue.ports.size());
+                if (Lowercase(Trim(queue.ports.substr(start, comma - start))) == wanted)
+                {
+                    out.push_back(queue);
+                    break;
+                }
+
+                start = comma + 1;
+            }
+        }
+
+        return out;
+    }
+
+    bool IsReadyPrintDriver(const std::string& driver)
+    {
+        return Lowercase(Trim(driver)) == "microsoft ipp class driver";
+    }
 
     ResetRunResult ExecutePayloadSequenceWithFallback(const std::vector<std::vector<unsigned char>>& sequence,
                                                       const ExecutorOptions& options,
@@ -546,6 +623,7 @@ namespace ewr {
 
             run.candidatesTried++;
             run.exec = result;
+            NoteSilentPort(run.silentPort, cand, result.handshakeFailed);
 
             // D4 stayed silent: try END4 on this same interface before moving
             // to the next candidate. Once per run, on the first silent one.
@@ -610,6 +688,8 @@ namespace ewr {
             run.exec.error = backend->DescribeOpenFailure(true);
             return run;
         }
+
+        SettleSilentPort(run.silentPort, run.exec.handshakeFailed, trace);
 
         if (!run.exec.success)
         {
@@ -700,6 +780,7 @@ namespace ewr {
 
             run.candidatesTried++;
             run.query = result;
+            NoteSilentPort(run.silentPort, cand, result.handshakeFailed);
 
             if (result.handshakeFailed && pinned < 1 && idx + 1 < candidates.size())
             {
@@ -715,6 +796,8 @@ namespace ewr {
 
         if (run.candidatesTried == 0)
             run.query.error = backend->DescribeOpenFailure(false);
+        else
+            SettleSilentPort(run.silentPort, run.query.handshakeFailed, trace);
 
         return run;
     }

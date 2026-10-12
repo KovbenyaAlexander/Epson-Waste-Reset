@@ -191,8 +191,15 @@ Useful first steps:
 
 * `ewr --list` shows every USB interface EWR can see and which one it would pick. On a printer that also scans, several will be listed.
 * `ewr --status` reads the counters without writing anything, so it is always safe to run.
-* On Windows, close Epson Status Monitor from the system tray if the device reports as busy.
 * If the printer says the **maintenance box** needs replacing rather than the ink pads, that box has its own chip - replace it or use a physical chip resetter. EWR resets the printer's internal counter, which is a different thing.
+
+If the printer does not answer, reports as busy, or the reset fails, try these before opening an issue - they settle most reports:
+
+1. **Close all other Epson software** - Epson Scan, Epson Event Manager, and Epson Status Monitor in the Windows system tray. A program talking to the printer at the same time can keep it busy or take EWR's replies.
+2. **Cancel every print job waiting for the printer.** A job sent before the error appeared stays in the queue, and while it waits the printer can refuse EWR's data. Open the printer's print queue (on Windows: Settings > Bluetooth & devices > Printers & scanners > your printer > Open print queue) and cancel everything in it. That alone is not enough: the printer keeps the part of the job it already received until the next step.
+3. **Power-cycle the printer**, after the queue is empty - with a job still queued, the computer sends it again as soon as the printer is back. Turn it off, then on, and wait until it has finished starting up before running EWR.
+4. **Use a USB port directly on the computer** (on a desktop, one at the back) - avoid hubs, front-panel ports and USB-C adapters.
+5. **Install Epson's own driver** from [epson.com/support](https://epson.com/support). On Windows 11, check first which driver Windows installed: `Get-Printer` in PowerShell lists each printer with its driver. **Microsoft IPP Class Driver** means Windows Ready Print is driving the printer, and with it an XP-332 never answered EWR at all (`ewr_trace.log` said `Printer did not answer the D4 Init transaction`). Remove the printer in Settings > Bluetooth & devices > Printers & scanners, install Epson's driver, and run EWR again.
 
 ## Building from Source
 

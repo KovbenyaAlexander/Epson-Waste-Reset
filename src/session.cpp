@@ -193,6 +193,53 @@ namespace ewr {
         return options;
     }
 
+    bool ReportSilentPortQueues(const SilentPortQueues& note)
+    {
+        bool reported = false;
+
+        for (const PrintQueue& queue : note.queues)
+        {
+            if (queue.waitingJobs <= 0)
+                continue;
+
+            reported = true;
+            const bool one = (queue.waitingJobs == 1);
+            log::Log(log::Level::Warning, log::Stage::Handshake, "usb.print_jobs_waiting",
+                     "[!] The printer did not answer, and " + std::to_string(queue.waitingJobs)
+                         + (one ? " print job is" : " print jobs are") + " waiting for it in the queue\n"
+                         "    \"" + queue.name + "\" on " + note.port + ". A waiting job can keep the printer from\n"
+                         "    taking EWR's data. Cancel " + (one ? "it" : "them") + " in Settings > Bluetooth & devices >\n"
+                         "    Printers & scanners > the printer > Open print queue, then power-cycle the\n"
+                         "    printer - it keeps the part it already received - and run EWR again.",
+                     { { "queue", queue.name }, { "port", note.port }, { "jobs", std::to_string(queue.waitingJobs) } });
+        }
+
+        for (const PrintQueue& queue : note.queues)
+        {
+            if (!IsReadyPrintDriver(queue.driver))
+                continue;
+
+            reported = true;
+            log::Log(log::Level::Warning, log::Stage::Handshake, "usb.ready_print_driver",
+                     "[!] The printer did not answer, and Windows Ready Print is driving it: the print\n"
+                     "    queue \"" + queue.name + "\" on " + note.port + " uses the Microsoft IPP Class Driver,\n"
+                     "    which can keep a printer from answering EWR. Remove the printer in Settings >\n"
+                     "    Bluetooth & devices > Printers & scanners, install Epson's own driver for it,\n"
+                     "    then run EWR again.",
+                     { { "queue", queue.name }, { "port", note.port } });
+        }
+
+        return reported;
+    }
+
+    // Once per run: a failed read is often followed by another that fails the
+    // same way.
+    void UsbDeviceGateway::ReportSilentPort(const SilentPortQueues& note)
+    {
+        if (!m_silentPortReported)
+            m_silentPortReported = ReportSilentPortQueues(note);
+    }
+
     ExecutorOptions UsbDeviceGateway::SoftResetOnce(ExecutorOptions options)
     {
         if (m_softResetSent)
@@ -214,8 +261,10 @@ namespace ewr {
             return busy;
         }
 
-        return ExecuteQuerySessionWithFallback(handshake, queries, WithPrinterName(SoftResetOnce(options)),
-                                               NextCallAppends());
+        QueryRunResult run = ExecuteQuerySessionWithFallback(handshake, queries, WithPrinterName(SoftResetOnce(options)),
+                                                             NextCallAppends());
+        ReportSilentPort(run.silentPort);
+        return run;
     }
 
     ResetRunResult UsbDeviceGateway::RunReset(
@@ -229,7 +278,10 @@ namespace ewr {
             return busy;
         }
 
-        return ExecutePayloadSequenceWithFallback(sequence, WithPrinterName(SoftResetOnce(options)), NextCallAppends());
+        ResetRunResult run = ExecutePayloadSequenceWithFallback(sequence, WithPrinterName(SoftResetOnce(options)),
+                                                                NextCallAppends());
+        ReportSilentPort(run.silentPort);
+        return run;
     }
 
     // ------------------------------------------------------------------

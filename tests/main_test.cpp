@@ -6110,8 +6110,12 @@ void test_composite_merges_candidates_in_member_order()
 {
     std::cout << "[TEST] test_composite_merges_candidates_in_member_order" << std::endl;
 
+    ewr::UsbCandidate printer = MakeCandidate("USBPRINT", 1);
+    printer.port = "USB001";
+    printer.queues = { { "EPSON XP-332 335 Series", "USB001", "Microsoft IPP Class Driver", 1 } };
+
     auto primary = std::make_unique<FakeBackend>("usbprint",
-        std::vector<ewr::UsbCandidate>{ MakeCandidate("USBPRINT", 1), MakeCandidate("IMAGE", 0) });
+        std::vector<ewr::UsbCandidate>{ printer, MakeCandidate("IMAGE", 0) });
     auto secondary = std::make_unique<FakeBackend>("libusb",
         std::vector<ewr::UsbCandidate>{ MakeCandidate("VENDOR", 2), MakeCandidate("VENDOR", 3) });
 
@@ -6142,6 +6146,89 @@ void test_composite_merges_candidates_in_member_order()
     CHECK(merged[2].interfaceNumber == 2);
     CHECK(merged[2].pid == "1187");
     CHECK(merged[0].path == "USBPRINT#if_1");
+
+    // The driver loop reads the silent port's queues off the merged list.
+    CHECK(merged[0].port == "USB001");
+    CHECK(merged[0].queues.size() == 1 && merged[0].queues[0].waitingJobs == 1);
+    CHECK(merged[2].port.empty() && merged[2].queues.empty());
+}
+
+void test_print_queues_are_matched_by_port()
+{
+    std::cout << "[TEST] test_print_queues_are_matched_by_port" << std::endl;
+
+    const std::vector<ewr::PrintQueue> queues = {
+        { "Microsoft Print to PDF", "PORTPROMPT:", "Microsoft Print To PDF", 0 },
+        { "EPSON R220", "USB002", "Epson ESC/P Standard 2 V4 Class Driver", 0 },
+        { "EPSON XP-332 335 Series", "USB001", "Microsoft IPP Class Driver", 0 },
+        { "Pooled", "USB003, usb004", "MICROSOFT IPP CLASS DRIVER", 0 },
+    };
+
+    const std::vector<ewr::PrintQueue> onUsb001 = ewr::QueuesOnPort(queues, "USB001");
+    CHECK(onUsb001.size() == 1 && onUsb001[0].name == "EPSON XP-332 335 Series");
+
+    const std::vector<ewr::PrintQueue> onUsb002 = ewr::QueuesOnPort(queues, "usb002");
+    CHECK(onUsb002.size() == 1 && onUsb002[0].name == "EPSON R220");
+
+    // A pooled queue names each of its ports, in any case.
+    CHECK(ewr::QueuesOnPort(queues, "USB004").size() == 1);
+    CHECK(ewr::QueuesOnPort(queues, "USB003").size() == 1);
+
+    // A prefix of a port is not that port, and no port is no queue.
+    CHECK(ewr::QueuesOnPort(queues, "USB00").empty());
+    CHECK(ewr::QueuesOnPort(queues, "").empty());
+
+    CHECK(ewr::IsReadyPrintDriver("Microsoft IPP Class Driver"));
+    CHECK(ewr::IsReadyPrintDriver(" MICROSOFT IPP CLASS DRIVER "));
+    CHECK(!ewr::IsReadyPrintDriver("Epson ESC/P Standard 2 V4 Class Driver"));
+    CHECK(!ewr::IsReadyPrintDriver(""));
+}
+
+// #55: an XP-332 never answered D4 Init under a Ready Print queue, and on an
+// R220 a waiting print job stalled every write.
+void test_silent_port_warns_about_waiting_jobs_and_ready_print()
+{
+    std::cout << "[TEST] test_silent_port_warns_about_waiting_jobs_and_ready_print" << std::endl;
+
+    std::vector<ewr::log::Event> events;
+    const int sinkId = ewr::log::Default().AddSink([&](const ewr::log::Event& e) { events.push_back(e); });
+
+    ewr::SilentPortQueues quiet;
+    quiet.port = "USB001";
+    quiet.queues = { { "EPSON R220", "USB001", "Epson ESC/P Standard 2 V4 Class Driver", 0 } };
+    CHECK(!ewr::ReportSilentPortQueues(quiet));
+    CHECK(!ewr::ReportSilentPortQueues(ewr::SilentPortQueues{}));
+    CHECK(events.empty());
+
+    ewr::SilentPortQueues note;
+    note.port = "USB001";
+    note.queues = {
+        { "EPSON XP-332 335 Series", "USB001", "Microsoft IPP Class Driver", 1 },
+        { "EPSON XP-332 (copy 1)", "USB001", "EPSON XP-332 335 Series", 3 },
+    };
+    CHECK(ewr::ReportSilentPortQueues(note));
+
+    ewr::log::Default().RemoveSink(sinkId);
+
+    // Jobs first: cancelling one is the cheaper fix.
+    CHECK(events.size() == 3);
+    if (events.size() == 3)
+    {
+        CHECK(events[0].code == "usb.print_jobs_waiting");
+        CHECK(events[0].level == ewr::log::Level::Warning);
+        CHECK(events[0].fields.at("queue") == "EPSON XP-332 335 Series");
+        CHECK(events[0].fields.at("port") == "USB001");
+        CHECK(events[0].fields.at("jobs") == "1");
+        CHECK(events[0].message.find("1 print job is waiting") != std::string::npos);
+
+        CHECK(events[1].code == "usb.print_jobs_waiting");
+        CHECK(events[1].fields.at("jobs") == "3");
+        CHECK(events[1].message.find("3 print jobs are waiting") != std::string::npos);
+
+        CHECK(events[2].code == "usb.ready_print_driver");
+        CHECK(events[2].fields.at("queue") == "EPSON XP-332 335 Series");
+        CHECK(events[2].fields.count("jobs") == 0);
+    }
 }
 
 void test_composite_identifies_a_shared_interface_by_number()
@@ -6756,7 +6843,7 @@ void test_console_hides_the_machinery()
         "usb.reset_not_confirmed", "snmp.reset_not_confirmed", "usb.claim_all_failed", "usb.another_run",
         "snmp.another_run", "session.device_not_found",
         "session.preflight_required", "session.db_conflict", "db.parse_error", "usb.busy_status_monitor",
-        "usb.access_denied", "usb.open_failed", "usb.soft_reset_settle_timeout",
+        "usb.access_denied", "usb.open_failed", "usb.soft_reset_settle_timeout", "usb.ready_print_driver", "usb.print_jobs_waiting",
     };
     for (const char* code : errorCodes)
         CHECK(ewr::cli::ConsoleRuleFor(code).action == ewr::cli::ConsoleAction::Show);
@@ -8035,6 +8122,8 @@ int main()
     test_json_contract_reports_absent_progress_as_null();
     test_run_lock_admits_one_run_at_a_time();
     test_composite_merges_candidates_in_member_order();
+    test_print_queues_are_matched_by_port();
+    test_silent_port_warns_about_waiting_jobs_and_ready_print();
     test_composite_identifies_a_shared_interface_by_number();
     test_composite_routes_every_call_to_the_owning_member();
     test_composite_runs_on_the_transports_that_came_up();

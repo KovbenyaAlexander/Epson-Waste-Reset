@@ -9,12 +9,41 @@ namespace ewr {
 
     constexpr uint16_t EPSON_VID = 0x04B8;
 
+    // One spooler queue as Windows lists it. `ports` is the queue's own
+    // comma-separated list: a pooled queue names several.
+    struct PrintQueue
+    {
+        std::string name;
+        std::string ports;
+        std::string driver;
+        // Not yet printed. A job stuck in "Deleting" counts: on an R220 a
+        // waiting job stalled every EWR write, and cancelling it left the
+        // printer blocked until a power cycle.
+        int waitingJobs = 0;
+    };
+
+    // "Microsoft IPP Class Driver", the queue driver Windows Ready Print
+    // installs. Under one, an XP-332 never answered D4 Init (#55) until
+    // Epson's own driver replaced it - the queue's jobs went with it.
+    bool IsReadyPrintDriver(const std::string& driver);
+
+    // The spooler queues on the port of the first interface whose handshake
+    // stayed silent. Empty unless the whole run ended silent; Windows
+    // usbprint only.
+    struct SilentPortQueues
+    {
+        // "USB001".
+        std::string port;
+        std::vector<PrintQueue> queues;
+    };
+
     struct ResetRunResult
     {
         bool deviceFound = false;
         size_t candidatesTried = 0;
         // The attempt that ran to completion, or the last one tried.
         ExecutionResult exec;
+        SilentPortQueues silentPort;
     };
 
     // Drives every Epson interface candidate in turn, best first. With
@@ -35,6 +64,7 @@ namespace ewr {
         size_t candidatesTried = 0;
         // The session that ran to completion, or the last one tried.
         QuerySessionResult query;
+        SilentPortQueues silentPort;
     };
 
     // Read-only counterpart of ExecutePayloadSequenceWithFallback. Silent
