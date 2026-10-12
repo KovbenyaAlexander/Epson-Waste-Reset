@@ -7,6 +7,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <sstream>
 
 namespace ewr {
 
@@ -82,15 +83,32 @@ namespace ewr {
 
     std::vector<NetworkPrinter> DiscoverNetworkPrinters(snmp::IBroadcastChannel& channel,
                                                         const std::vector<std::string>& targets,
-                                                        int waitMs, std::string& error)
+                                                        int waitMs, std::string& error,
+                                                        std::ostream* trace)
     {
+        std::ostringstream unused;
+        std::ostream& log = trace ? *trace : unused;
+
+        log << "==================================================\n"
+               "NETWORK SEARCH (SNMP v1 device ID, UDP " << snmp::kPort << ")\n"
+               "Asked:         ";
+        for (std::size_t i = 0; i < targets.size(); ++i)
+            log << (i ? ", " : "") << targets[i];
+        log << "\nListening:     " << waitMs << " ms, asking again at " << waitMs / 3 << " ms\n"
+               "==================================================\n";
+
         const std::vector<unsigned char> request =
             snmp::EncodeGetRequest(kCommunity, kDiscoveryRequestId, SnmpDeviceIdOid());
         auto ask = [&]()
         {
             bool anySent = false;
             for (const std::string& target : targets)
-                anySent = channel.SendTo(target, snmp::kPort, request) || anySent;
+            {
+                if (channel.SendTo(target, snmp::kPort, request))
+                    anySent = true;
+                else
+                    log << "[!] This machine refused the send to " << target << ".\n";
+            }
             return anySent;
         };
 
@@ -102,15 +120,15 @@ namespace ewr {
 
         std::vector<NetworkPrinter> found;
 
-        // macOS refuses a terminal without the Local Network permission
-        // locally, broadcasts and all; listening for answers would only end
-        // in "none found", which blames the network.
+        // Listening after every send was refused would only end in "none
+        // found", which blames the network for what this machine did.
         if (!ask())
         {
             error = "This computer refused to send to the local network, so the search says nothing"
-                    " about the printers on it. Usual causes: a VPN or firewall that cuts off the"
-                    " local network, or on macOS a terminal app without the Local Network permission"
-                    " (System Settings > Privacy & Security > Local Network; sudo also gets past it).";
+                    " about the printers on it. A VPN or a firewall can cut the local network off, and"
+                    " an operating system can keep a program off it (on macOS, see System Settings >"
+                    " Privacy & Security > Local Network).";
+            log << "Result:        not sent - " << error << "\n\n";
             return found;
         }
 
@@ -130,20 +148,44 @@ namespace ewr {
             if (!channel.ReceiveFrom(static_cast<int>(std::max<long long>(left, 1)), from, datagram))
                 continue;
 
+            log << "[IN]  " << std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start).count()
+                << " ms  " << from << ": ";
+
             snmp::GetResponse response;
-            if (!snmp::DecodeGetResponse(datagram, response) || response.requestId != kDiscoveryRequestId
-                || response.errorStatus != 0 || response.valueTag != snmp::kTagOctetString)
+            if (!snmp::DecodeGetResponse(datagram, response) || response.requestId != kDiscoveryRequestId)
+            {
+                log << "not an answer to this search (" << datagram.size() << " bytes) - skipped\n";
                 continue;
+            }
+            if (response.errorStatus != 0)
+            {
+                log << "SNMP error-status " << response.errorStatus << " (not an Epson device ID) - skipped\n";
+                continue;
+            }
+            if (response.valueTag != snmp::kTagOctetString)
+            {
+                log << "a value that is not a string - skipped\n";
+                continue;
+            }
 
             const std::string deviceId = ExtractDeviceIdString(response.value.data(), response.value.size());
             const DeviceIdInfo info = ParseIeee1284DeviceId(deviceId);
             if (!MadeByEpson(info))
+            {
+                log << "not an Epson (MFG \"" << info.manufacturer << "\") - skipped\n";
                 continue;
+            }
 
             const bool seen = std::any_of(found.begin(), found.end(),
                                           [&from](const NetworkPrinter& printer) { return printer.address == from; });
-            if (!seen)
-                found.push_back({ from, deviceId, info.model });
+            if (seen)
+            {
+                log << "answered again - already listed\n";
+                continue;
+            }
+
+            log << "EPSON, MDL \"" << info.model << "\" - kept\n";
+            found.push_back({ from, deviceId, info.model });
         }
 
         std::sort(found.begin(), found.end(), [](const NetworkPrinter& a, const NetworkPrinter& b)
@@ -152,16 +194,25 @@ namespace ewr {
             const uint32_t right = AddressOrder(b.address);
             return left != right ? left < right : a.address < b.address;
         });
+
+        log << "Result:        " << found.size() << " Epson printer(s)";
+        for (std::size_t i = 0; i < found.size(); ++i)
+            log << (i ? ", " : ": ") << found[i].address;
+        log << "\n\n";
         return found;
     }
 
-    std::vector<NetworkPrinter> DiscoverNetworkPrinters(int waitMs, std::string& error)
+    std::vector<NetworkPrinter> DiscoverNetworkPrinters(int waitMs, std::string& error, std::ostream* trace)
     {
         const std::unique_ptr<snmp::IBroadcastChannel> channel = snmp::OpenBroadcastChannel(error);
         if (!channel)
+        {
+            if (trace)
+                *trace << "NETWORK SEARCH not possible: " << error << "\n\n";
             return {};
+        }
 
-        return DiscoverNetworkPrinters(*channel, snmp::LocalBroadcastAddresses(), waitMs, error);
+        return DiscoverNetworkPrinters(*channel, snmp::LocalBroadcastAddresses(), waitMs, error, trace);
     }
 
     snmp::Oid SnmpDeviceIdOid()
@@ -234,7 +285,7 @@ namespace ewr {
             return;
 
         m_traceStarted = true;
-        m_traceFile.open("ewr_trace.log", std::ios::out | std::ios::trunc);
+        m_traceFile.open("ewr_trace.log", std::ios::out | (m_traceAppends ? std::ios::app : std::ios::trunc));
         m_trace = &m_traceFile;
 
         Trace("==================================================\n"
@@ -245,6 +296,15 @@ namespace ewr {
 
         if (!m_openError.empty())
             Trace("[!] " + m_openError + "\n");
+    }
+
+    void SnmpDeviceGateway::AppendTrace(const std::string& text)
+    {
+        if (!ClaimPrinter())
+            return;
+
+        StartTrace();
+        Trace(text);
     }
 
     // A read answered with a value anywhere in the run settles it: the lock is

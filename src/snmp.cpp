@@ -282,8 +282,8 @@ namespace snmp {
 #endif
 
         // A send this machine refuses can fail with EPIPE even on UDP - macOS
-        // does it to a terminal without the Local Network permission - and
-        // the default for that is a signal that ends the process before the
+        // has been seen doing it to a program it keeps off the local network -
+        // and the default for that is a signal that ends the process before the
         // run can say why. Off per call on Linux, per socket on macOS.
 #if defined(MSG_NOSIGNAL)
         constexpr int kSendFlags = MSG_NOSIGNAL;

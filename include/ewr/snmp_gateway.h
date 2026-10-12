@@ -37,14 +37,18 @@ namespace ewr {
     // way in for a printer that missed the first, and keeps the Epson
     // printers that answer within waitMs: one per address, in address order.
     // Empty with `error` set when this machine refused every send, which
-    // says nothing about the printers out there.
+    // says nothing about the printers out there. `trace`, when given, gets
+    // what was asked and every answer with why it was kept or skipped: the
+    // only record there is when the printer is not found.
     std::vector<NetworkPrinter> DiscoverNetworkPrinters(snmp::IBroadcastChannel& channel,
                                                         const std::vector<std::string>& targets,
-                                                        int waitMs, std::string& error);
+                                                        int waitMs, std::string& error,
+                                                        std::ostream* trace = nullptr);
 
     // The same over this machine's own networks, with `error` also set when
     // no broadcast socket could be opened.
-    std::vector<NetworkPrinter> DiscoverNetworkPrinters(int waitMs, std::string& error);
+    std::vector<NetworkPrinter> DiscoverNetworkPrinters(int waitMs, std::string& error,
+                                                        std::ostream* trace = nullptr);
 
     // A network printer behind the same seam as a USB one. Status, EEPROM
     // reads and EEPROM writes all travel as SNMP GETs - a write is a GET whose
@@ -83,6 +87,14 @@ namespace ewr {
         // has nothing left to claim.
         void AdoptRunLock(std::unique_ptr<RunLock> lock);
 
+        // The run's ewr_trace.log was already started - by the USB scan or the
+        // network search - so this gateway appends to it instead.
+        void ContinueRunTrace() { m_traceAppends = true; }
+
+        // Text from outside a device session (the network search) into the
+        // trace, starting it if no device call has.
+        void AppendTrace(const std::string& text);
+
         // Non-empty when no channel could be opened at all (a host name that
         // does not resolve). Every call then fails with it.
         const std::string& OpenError() const { return m_openError; }
@@ -93,8 +105,8 @@ namespace ewr {
         bool Answered() const { return m_answered; }
 
         // No request ever left this machine: every send was refused locally.
-        // That is this machine - a VPN, a firewall, or on macOS a terminal
-        // without the Local Network permission - not a printer that is off.
+        // That is this machine - a VPN, a firewall, or an operating system
+        // keeping this program off the local network - not a printer that is off.
         bool SendBlocked() const { return m_sendFailed && !m_sendSucceeded; }
 
         bool OverNetwork() const override { return true; }
@@ -136,6 +148,7 @@ namespace ewr {
         bool m_claimsRunLock = false;
         bool m_started = false;
         bool m_traceStarted = false;
+        bool m_traceAppends = false;
         bool m_answered = false;
         bool m_sendFailed = false;
         bool m_sendSucceeded = false;

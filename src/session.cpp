@@ -136,6 +136,14 @@ namespace ewr {
         return false;
     }
 
+    void UsbDeviceGateway::AppendTrace(const std::string& text)
+    {
+        if (!ClaimPrinter())
+            return;
+
+        AppendTraceNote(text, NextCallAppends());
+    }
+
     std::unique_ptr<RunLock> UsbDeviceGateway::ReleaseRunLock()
     {
         if (!m_runLock || !m_runLock->Held())

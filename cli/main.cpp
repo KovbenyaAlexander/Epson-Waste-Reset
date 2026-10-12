@@ -583,13 +583,19 @@ static int UsageError(const CliOptions& cli, const std::string& message)
 static void PrintNetworkSearchHints()
 {
     std::cout << "    A printer on the network has to be on, on this computer's network, and have\n"
-                 "    SNMP enabled in its web settings. A VPN, or on macOS a terminal without the\n"
-                 "    Local Network permission, keeps the search from reaching it. Its address is on\n"
-                 "    its network status sheet: ewr --ip <address> goes straight to it." << std::endl;
+                 "    SNMP enabled in its web settings. A VPN, a firewall, or a system setting that\n"
+                 "    keeps programs off the local network (on macOS, possibly Local Network under\n"
+                 "    Privacy & Security) can stop the search reaching it. Its address is on its\n"
+                 "    network status sheet: ewr --ip <address> goes straight to it." << std::endl;
 }
 
+// ChooseNetworkPrinter's answers besides an index: "none of these", and no
+// stdin to ask, which needs telling apart - its fix is --ip.
+constexpr int kNoPrinterChosen = -1;
+constexpr int kNoInputForPrinter = -2;
+
 // The network search's menu. Even a lone printer is picked, not assumed: the
-// network may hold someone else's Epson. -1 when none was chosen.
+// network may hold someone else's Epson.
 static int ChooseNetworkPrinter(const std::vector<ewr::NetworkPrinter>& found,
                                 const std::vector<ewr::ModelNameEntry>& entries)
 {
@@ -613,12 +619,14 @@ static int ChooseNetworkPrinter(const std::vector<ewr::NetworkPrinter>& found,
         std::cout << "\nSelect a printer [0-" << found.size() << "]: ";
         std::string line;
         if (!std::getline(std::cin, line))
-            return -1;
+            return kNoInputForPrinter;
 
         try
         {
             const int choice = std::stoi(line);
-            if (choice >= 0 && choice <= static_cast<int>(found.size()))
+            if (choice == 0)
+                return kNoPrinterChosen;
+            if (choice >= 1 && choice <= static_cast<int>(found.size()))
                 return choice - 1;
         }
         catch (...)
@@ -1188,7 +1196,10 @@ int main(int argc, char* argv[])
 
         std::cout << "\n[*] Searching the local network for Epson printers (SNMP, read-only)..." << std::endl;
         std::string searchError;
-        const std::vector<ewr::NetworkPrinter> network = ewr::DiscoverNetworkPrinters(ewr::kDiscoveryWaitMs, searchError);
+        std::ostringstream searchTrace;
+        const std::vector<ewr::NetworkPrinter> network =
+            ewr::DiscoverNetworkPrinters(ewr::kDiscoveryWaitMs, searchError, &searchTrace);
+        listGateway.AppendTrace(searchTrace.str());
         nlohmann::json jsonNetwork = nlohmann::json::array();
 
         if (!searchError.empty())
@@ -1374,9 +1385,9 @@ int main(int argc, char* argv[])
             if (netGateway->SendBlocked())
             {
                 std::cerr << "        The request never left this machine, so this says nothing about the printer.\n"
-                             "        Usual causes: a VPN or firewall that cuts off the local network, or on macOS\n"
-                             "        a terminal app without the Local Network permission (System Settings >\n"
-                             "        Privacy & Security > Local Network). Running with sudo also gets past the latter." << std::endl;
+                             "        A VPN or firewall can cut off the local network, and an operating system can\n"
+                             "        keep a program off it (on macOS, see System Settings > Privacy & Security >\n"
+                             "        Local Network)." << std::endl;
             }
             else if (netGateway->OpenError().empty())
             {
@@ -1428,7 +1439,12 @@ int main(int argc, char* argv[])
         std::cout << "[i] Searching the local network for Epson printers (SNMP)... " << std::flush;
 
         std::string searchError;
-        const std::vector<ewr::NetworkPrinter> found = ewr::DiscoverNetworkPrinters(ewr::kDiscoveryWaitMs, searchError);
+        std::ostringstream searchTrace;
+        const std::vector<ewr::NetworkPrinter> found =
+            ewr::DiscoverNetworkPrinters(ewr::kDiscoveryWaitMs, searchError, &searchTrace);
+
+        // Before the lock can move on: writing the trace needs the claim.
+        usbGateway.AppendTrace(searchTrace.str());
 
         if (!searchError.empty())
         {
@@ -1445,11 +1461,23 @@ int main(int argc, char* argv[])
             std::cout << "found " << found.size() << "." << std::endl;
 
             const int choice = ChooseNetworkPrinter(found, smartEntries);
+            if (choice == kNoInputForPrinter)
+            {
+                // The model prompt after this would ask for --model, but the
+                // printer is what is missing.
+                std::cerr << "\n[ERROR] No input available: EWR needs you to pick the printer and stdin\n"
+                             "        is closed. Pass --ip <address>, one from the list above, to choose\n"
+                             "        it non-interactively." << std::endl;
+                JsonFail("blocked", "No printer was chosen from the network search, and stdin is closed.");
+                return FinishRun(1);
+            }
+
             if (choice >= 0)
             {
                 const ewr::NetworkPrinter& chosen = found[static_cast<std::size_t>(choice)];
                 cli.ip = chosen.address;
                 netGateway = std::make_unique<ewr::SnmpDeviceGateway>(cli.ip);
+                netGateway->ContinueRunTrace();
                 netGateway->AdoptRunLock(usbGateway.ReleaseRunLock());
 
                 devIdQuery.found = true;
@@ -1754,6 +1782,11 @@ int main(int argc, char* argv[])
         std::vector<MenuOption> filteredOptions;
         for (const auto& opt : options)
         {
+            // A Replay dump is bytes for a USB channel; over the network there
+            // is nothing it could be sent through.
+            if (netGateway && opt.isReplay)
+                continue;
+
             if (toLower(opt.displayName).find(searchLower) != std::string::npos)
                 filteredOptions.push_back(opt);
         }

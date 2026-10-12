@@ -7747,9 +7747,22 @@ void test_snmp_discovery_keeps_only_epson_answers()
     };
 
     std::string error;
+    std::ostringstream trace;
     const std::vector<ewr::NetworkPrinter> found =
-        ewr::DiscoverNetworkPrinters(network, { "255.255.255.255", "192.168.1.255" }, 300, error);
+        ewr::DiscoverNetworkPrinters(network, { "255.255.255.255", "192.168.1.255" }, 300, error, &trace);
     CHECK(error.empty());
+
+    // When the printer is not found, this is the only record of why: what
+    // was asked, and every answer with the reason it was kept or skipped.
+    const std::string log = trace.str();
+    CHECK(log.find("Asked:         255.255.255.255, 192.168.1.255") != std::string::npos);
+    CHECK(log.find("  192.168.1.9: EPSON, MDL \"L3150 Series\" - kept") != std::string::npos);
+    CHECK(log.find("192.168.1.30: SNMP error-status 2") != std::string::npos);
+    CHECK(log.find("192.168.1.31: not an Epson (MFG \"Hewlett-Packard\")") != std::string::npos);
+    CHECK(log.find("192.168.1.32: not an answer to this search") != std::string::npos);
+    CHECK(log.find("192.168.1.33: not an answer to this search") != std::string::npos);
+    CHECK(log.find("answered again - already listed") != std::string::npos);
+    CHECK(log.find("Result:        2 Epson printer(s): 192.168.1.9, 192.168.1.40") != std::string::npos);
 
     // Two Epsons, once each, by address as a number: .9 before .40.
     CHECK(found.size() == 2);
@@ -7779,9 +7792,11 @@ void test_snmp_discovery_keeps_only_epson_answers()
     blocked.refuseSend = true;
     blocked.agents = network.agents;
     const auto before = std::chrono::steady_clock::now();
-    CHECK(ewr::DiscoverNetworkPrinters(blocked, { "255.255.255.255" }, 2000, error).empty());
+    std::ostringstream blockedTrace;
+    CHECK(ewr::DiscoverNetworkPrinters(blocked, { "255.255.255.255" }, 2000, error, &blockedTrace).empty());
     CHECK(error.find("refused to send") != std::string::npos);
     CHECK(std::chrono::steady_clock::now() - before < std::chrono::milliseconds(1000));
+    CHECK(blockedTrace.str().find("refused the send to 255.255.255.255") != std::string::npos);
 }
 
 void test_run_lock_hands_over_to_the_network()

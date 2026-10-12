@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -473,7 +474,15 @@ int ewr_discover_network(ewr_session* session, char** out_json)
             return EWR_ERR_INVALID_ARGUMENT;
 
         std::string error;
-        const std::vector<ewr::NetworkPrinter> found = ewr::DiscoverNetworkPrinters(ewr::kDiscoveryWaitMs, error);
+        std::ostringstream searchTrace;
+        const std::vector<ewr::NetworkPrinter> found =
+            ewr::DiscoverNetworkPrinters(ewr::kDiscoveryWaitMs, error, &searchTrace);
+
+        if (session->net)
+            session->net->AppendTrace(searchTrace.str());
+        else
+            session->usb.AppendTrace(searchTrace.str());
+
         if (!error.empty())
         {
             session->Fail(error);

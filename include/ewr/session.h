@@ -175,6 +175,11 @@ namespace ewr {
         // This gateway is done after it; its next call would claim again.
         std::unique_ptr<RunLock> ReleaseRunLock();
 
+        // The network search's notes into this run's ewr_trace.log: they start
+        // it on a run that has not touched USB, and follow the USB scan on one
+        // that has. Before ReleaseRunLock, since writing needs the claim.
+        void AppendTrace(const std::string& text);
+
     private:
         // False exactly once: the call that must start the trace file fresh.
         bool NextCallAppends();
