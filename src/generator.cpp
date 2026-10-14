@@ -40,6 +40,59 @@ namespace ewr {
 
     } // namespace
 
+    bool WriteKeyFromJson(const std::string& utf8, std::string& bytes)
+    {
+        std::string out;
+        for (std::size_t i = 0; i < utf8.size(); ++i)
+        {
+            const unsigned char c = static_cast<unsigned char>(utf8[i]);
+            if (c < 0x80)
+            {
+                out += static_cast<char>(c);
+                continue;
+            }
+
+            // U+0080..U+00FF are exactly the sequences C2 80..C3 BF.
+            if ((c != 0xC2 && c != 0xC3) || i + 1 >= utf8.size())
+                return false;
+
+            const unsigned char next = static_cast<unsigned char>(utf8[++i]);
+            if ((next & 0xC0) != 0x80)
+                return false;
+
+            out += static_cast<char>(((c & 0x1F) << 6) | (next & 0x3F));
+        }
+
+        bytes = std::move(out);
+        return true;
+    }
+
+    std::string WriteKeyToJson(const std::string& bytes)
+    {
+        std::string out = "\"";
+        for (const char ch : bytes)
+        {
+            const unsigned char c = static_cast<unsigned char>(ch);
+            if (c == '"' || c == '\\')
+            {
+                out += '\\';
+                out += ch;
+            }
+            else if (c < 0x20 || c >= 0x7F)
+            {
+                char esc[8];
+                std::snprintf(esc, sizeof(esc), "\\u%04x", c);
+                out += esc;
+            }
+            else
+            {
+                out += ch;
+            }
+        }
+        out += '"';
+        return out;
+    }
+
     bool UniversalGenerator::LoadDatabase(const std::string& filepath)
     {
         std::lock_guard<std::mutex> lock(m_dbMutex);
@@ -83,6 +136,15 @@ namespace ewr {
                 ? &j["specs"]
                 : nullptr;
 
+            auto skipEntry = [&skippedEntries](const std::string& key, const std::string& why)
+            {
+                skippedEntries++;
+                std::ostringstream oss;
+                oss << "[!] Skipping malformed database entry '" << key << "': " << why;
+                ewr::log::Log(ewr::log::Level::Warning, ewr::log::Stage::Database,
+                              "db.entry_skipped", oss.str());
+            };
+
             for (auto& [key, rawVal] : modelsRoot.items())
             {
                 // Reserved root keys of the flat form; never printer names.
@@ -103,8 +165,12 @@ namespace ewr {
                     DbPrinterModel model;
                     model.name = key;
                     model.rkey = val.value("rkey", 0);
-                    model.wkey = val.value("wkey", "");
-                    model.wkey1 = val.value("wkey1", "");
+                    if (!WriteKeyFromJson(val.value("wkey", ""), model.wkey)
+                        || !WriteKeyFromJson(val.value("wkey1", ""), model.wkey1))
+                    {
+                        skipEntry(key, "write keyword is not one byte per character");
+                        continue;
+                    }
                     model.rlen = val.value("rlen", 2);
                     model.wlen = val.value("wlen", 2);
                     model.mem_high = val.value("mem_high", 2047);
@@ -275,12 +341,7 @@ namespace ewr {
                 }
                 catch (const json::exception& e)
                 {
-                    skippedEntries++;
-                    std::ostringstream oss;
-                    oss << "[!] Skipping malformed database entry '" << key
-                        << "': " << e.what();
-                    ewr::log::Log(ewr::log::Level::Warning, ewr::log::Stage::Database,
-                                  "db.entry_skipped", oss.str());
+                    skipEntry(key, e.what());
                 }
             }
 

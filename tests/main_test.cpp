@@ -745,12 +745,17 @@ void test_database_integrity()
     size_t withoutCounters = 0;
     bool namesOk = true;
     bool keysOk = true;
+    bool keyBytesOk = true;
     bool arraysOk = true;
 
     for (const auto& m : models)
     {
         if (m.name.empty())
             namesOk = false;
+
+        // A keyword is 8 bytes on the wire; UTF-8 made three families' 12 (#59).
+        if (m.wkey.size() != 8 || (!m.wkey1.empty() && m.wkey1.size() != 8))
+            keyBytesOk = false;
 
         if (!m.HasResettableCounters())
         {
@@ -767,6 +772,7 @@ void test_database_integrity()
 
     CHECK(namesOk);
     CHECK(keysOk);
+    CHECK(keyBytesOk);
     CHECK(arraysOk);
     CHECK(withCounters > 1000);
 
@@ -1410,6 +1416,108 @@ void test_database_load_skips_malformed_entries()
     CHECK(loaded);
     CHECK(gen.GetAvailableModels().size() == 2);
     CHECK(captured.find("BadModel") != std::string::npos);
+}
+
+void test_write_key_bytes_above_0x7f_are_sent_raw()
+{
+    std::cout << "[TEST] test_write_key_bytes_above_0x7f_are_sent_raw" << std::endl;
+
+    ewr::UniversalGenerator gen;
+    CHECK(gen.LoadDatabase("database.json"));
+
+    std::map<std::string, ewr::DbPrinterModel> byName;
+    for (auto& m : gen.GetAvailableModels())
+        byName[m.name] = m;
+
+    // The write #59's SC-P600 should have received: its trace had length
+    // 0x14 and the keyword as c2 97 26 c2 86 ...
+    const auto p600 = byName.find("SC-P600");
+    CHECK(p600 != byName.end());
+    if (p600 != byName.end())
+    {
+        const std::vector<unsigned char> expected = {
+            0x02, 0x02, 0x00, 0x1A, 0x00, 0x00, 0x7C, 0x7C, 0x10, 0x00, 0x02, 0x52, 0x42, 0xBD, 0x21,
+            0x29, 0x01, 0x00, 0x97, 0x26, 0x86, 0x97, 0x36, 0x16, 0x16, 0xB6 };
+        CHECK(ewr::UniversalGenerator::GenerateWritePacket(p600->second.rkey, 0x0129, 0x00, p600->second.wkey,
+                                                           p600->second.WriteAddressLength()) == expected);
+    }
+
+    // As ez-reset's <keyword> lists them. R220's NUL-padded key is
+    // hardware-verified and must not move.
+    const struct { const char* model; std::vector<unsigned char> key; } cases[] = {
+        { "SC-P400", { 0x37, 0x57, 0x36, 0x86, 0x96, 0xB6, 0x17, 0x47 } },
+        { "SC-P700", { 0x37, 0x57, 0xA6, 0x16, 0xB7, 0x56, 0x76, 0xF7 } },
+        { "R220",    { 'M', 'c', 'L', 'a', 'r', 'e', 'n', 0x00 } },
+    };
+
+    for (const auto& c : cases)
+    {
+        const auto it = byName.find(c.model);
+        CHECK(it != byName.end());
+        if (it == byName.end())
+            continue;
+
+        const ewr::DbPrinterModel& m = it->second;
+        const auto pkt = ewr::UniversalGenerator::GenerateWritePacket(m.rkey, 0x30, 0x00, m.wkey,
+                                                                      m.WriteAddressLength());
+        CHECK(((size_t)pkt[8] | ((size_t)pkt[9] << 8)) == 6 + m.WriteAddressLength() + 8u);
+        CHECK(std::equal(c.key.begin(), c.key.end(), pkt.end() - c.key.size()));
+    }
+}
+
+void test_write_key_json_round_trip()
+{
+    std::cout << "[TEST] test_write_key_json_round_trip" << std::endl;
+
+    std::string bytes;
+    CHECK(ewr::WriteKeyFromJson("\xC2\x97&", bytes) && bytes == "\x97&");
+    CHECK(!ewr::WriteKeyFromJson("\xC4\x80", bytes)); // U+0100 has no single byte
+    CHECK(!ewr::WriteKeyFromJson("ab\xC2", bytes));   // truncated sequence
+    CHECK(!ewr::WriteKeyFromJson("\x97", bytes));     // a raw byte is not UTF-8
+
+    const std::string p600("\x97\x26\x86\x97\x36\x16\x16\xB6", 8);
+    const std::string r220("McLaren\0", 8);
+
+    // database.json's own spelling, so a --find-addresses file pastes back in.
+    CHECK(ewr::WriteKeyToJson(p600) == "\"\\u0097&\\u0086\\u00976\\u0016\\u0016\\u00b6\"");
+    CHECK(ewr::WriteKeyToJson(r220) == "\"McLaren\\u0000\"");
+
+    for (const std::string& key : { p600, r220, std::string("Ar\"ka\\noid") })
+    {
+        std::string back;
+        CHECK(ewr::WriteKeyFromJson(nlohmann::json::parse(ewr::WriteKeyToJson(key)).get<std::string>(), back));
+        CHECK(back == key);
+    }
+
+    const std::string path = "test_write_key_db.json";
+    {
+        std::ofstream out(path);
+        out << R"({"schema_version": 4, "models": {)"
+            << " \"HighKey\": {\"rkey\": 8, \"wkey\": \"\\u0097&\\u0086\\u00976\\u0016\\u0016\\u00b6\", \"addresses\": [24], \"reset\": [0]},"
+            << " \"WideKey\": {\"rkey\": 8, \"wkey\": \"Arkan\\u0100id\", \"addresses\": [25], \"reset\": [0]},"
+            << " \"WideKey1\": {\"rkey\": 8, \"wkey\": \"Arkanoid\", \"wkey1\": \"Bslbop\\u0100e\","
+            << R"( "addresses": [26], "reset": [0]}}})";
+    }
+
+    std::string skipped;
+    const int sinkId = ewr::log::Default().AddSink([&](const ewr::log::Event& e) {
+        if (e.code == "db.entry_skipped")
+            skipped += e.message + "\n";
+    });
+
+    ewr::UniversalGenerator gen;
+    const bool loaded = gen.LoadDatabase(path);
+
+    ewr::log::Default().RemoveSink(sinkId);
+    fs::remove(path);
+
+    // A key with no byte spelling is skipped, never sent as something else.
+    CHECK(loaded);
+    const auto models = gen.GetAvailableModels();
+    CHECK(models.size() == 1);
+    CHECK(models.size() == 1 && models[0].name == "HighKey" && models[0].wkey == p600);
+    CHECK(skipped.find("'WideKey'") != std::string::npos);
+    CHECK(skipped.find("'WideKey1'") != std::string::npos);
 }
 
 void test_database_reload_replaces_previous_contents()
@@ -8095,6 +8203,8 @@ int main()
     test_executor_na_refusal_fatal_in_replay_mode();
     test_generator_respects_mem_high();
     test_database_load_skips_malformed_entries();
+    test_write_key_bytes_above_0x7f_are_sent_raw();
+    test_write_key_json_round_trip();
     test_database_reload_replaces_previous_contents();
     test_status_reply_parsing();
     test_status_reply_without_fields_is_invalid();

@@ -2355,9 +2355,9 @@ int main(int argc, char* argv[])
         body << "            \"mem_high\": " << selected.smartModel.mem_high << ",\n";
         body << "            \"rkey\": " << selected.smartModel.rkey << ",\n";
         body << "            \"rlen\": " << selected.smartModel.rlen << ",\n";
-        body << "            \"wkey\": \"" << selected.smartModel.wkey << "\",\n";
+        body << "            \"wkey\": " << ewr::WriteKeyToJson(selected.smartModel.wkey) << ",\n";
         if (!selected.smartModel.wkey1.empty())
-            body << "            \"wkey1\": \"" << selected.smartModel.wkey1 << "\",\n";
+            body << "            \"wkey1\": " << ewr::WriteKeyToJson(selected.smartModel.wkey1) << ",\n";
         body << "            \"wlen\": " << selected.smartModel.wlen << ",\n";
 
         std::string safeName;

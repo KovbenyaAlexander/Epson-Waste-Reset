@@ -148,11 +148,20 @@ namespace ewr {
         std::vector<uint8_t> reset_values; // parallel to addresses; 0x00 == full
     };
 
+    // database.json spells a write keyword as one code point per byte
+    // ("\u0097&\u0086..."), but the JSON parser hands back UTF-8, which sent
+    // 0x97 as c2 97 and made the SC-P600's 8-byte keyword 12 (#59). False on a
+    // code point above U+00FF or malformed UTF-8.
+    bool WriteKeyFromJson(const std::string& utf8, std::string& bytes);
+
+    // The inverse: a quoted JSON string literal, in database.json's spelling.
+    std::string WriteKeyToJson(const std::string& bytes);
+
     struct DbPrinterModel
     {
         std::string name;
         uint16_t rkey{0};
-        std::string wkey;
+        std::string wkey;  // raw keyword bytes, not text
         std::string wkey1;
         uint16_t rlen{2};
         uint16_t wlen{2};
