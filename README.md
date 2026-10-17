@@ -45,10 +45,10 @@ No internet connection is needed - the database ships in the download. When EWR 
 Download EWR only from the [Releases page](https://github.com/RxNaison/Epson-Waste-Reset/releases/latest). Copies passed around elsewhere - in video descriptions, on forums - may not be what they claim to be. From v1.4.1 on, every release archive, including the `EWR-SDK-*` ones, carries a signed build-provenance attestation tying it to this repository and to the exact build that produced it. You can check it with the [GitHub CLI](https://cli.github.com/), signed in (`gh auth login`):
 
 ```bash
-gh attestation verify EWR-v1.5.0-win.zip -R RxNaison/Epson-Waste-Reset
+gh attestation verify EWR-v1.5.1-win.zip -R RxNaison/Epson-Waste-Reset
 ```
 
-`✓ Verification succeeded!` means the file is byte for byte what this repository's release workflow built, and its `Build workflow` line ends in the tag it was built from (`@refs/tags/v1.5.0`) - check that it is the version you meant to download. A modified file fails with `HTTP 404: Not Found`: no attestation exists for its contents. If an archive from v1.4.1 or later fails, don't run it. Releases before v1.4.1 have no attestation and fail the same way, so the check cannot vouch for them. This is not code signing: Windows may still warn that the app is unrecognized.
+`✓ Verification succeeded!` means the file is byte for byte what this repository's release workflow built, and its `Build workflow` line ends in the tag it was built from (`@refs/tags/v1.5.1`) - check that it is the version you meant to download. A modified file fails with `HTTP 404: Not Found`: no attestation exists for its contents. If an archive from v1.4.1 or later fails, don't run it. Releases before v1.4.1 have no attestation and fail the same way, so the check cannot vouch for them. This is not code signing: Windows may still warn that the app is unrecognized.
 
 ### Command-line options
 
